@@ -1,119 +1,89 @@
 """
-Nigerian betting arbitrage bot — main loop.
+Wrapper for Bet9ja and NairaBet odds via the NaijaBet_Api library
+(https://github.com/jayteealao/NaijaBet_Api, also on PyPI as NaijaBet-Api).
 
-Every POLL_INTERVAL_SECONDS:
-  1. Fetch Bet9ja + NairaBet odds (via NaijaBet_Api)
-  2. Fetch 1xBet + Betway odds (via The Odds API)
-  3. Match the same real-world matches across both sources
-  4. Check each matched match for a guaranteed-profit arbitrage
-  5. Alert on Telegram with exact stake amounts, respecting a cooldown so
-     the same standing opportunity doesn't spam you every cycle
+IMPORTANT — read this: this is an UNOFFICIAL third-party library that
+accesses Bet9ja/NairaBet's own internal endpoints directly. It is NOT an
+API these bookmakers publish or document themselves. That means:
+  - it could break without warning if either site changes their backend
+  - automated access like this is likely outside what their terms of
+    service intend, even though this only reads public odds (no login,
+    no account access, no bet placement)
+Treat it as a genuinely useful but fragile data source, not a stable
+guarantee — worth checking on periodically to confirm it's still working.
 
-Run with: python main.py
+CONFIRMED (from a real error log): the GitHub README's import style
+(`from NaijaBet_Api.bookmakers import Bet9ja, Nairabet`) does NOT match
+what's actually installed via pip — it raised
+`ImportError: cannot import name 'Bet9ja' from 'NaijaBet_Api.bookmakers'`.
+The PyPI page's own documented usage (which matches what pip actually
+installs) uses a different pattern instead:
+    from NaijaBet_Api.bookmakers import bet9ja   # lowercase MODULE name
+    b9 = bet9ja.Bet9ja()                          # class accessed through it
+This file now uses that confirmed-correct pattern.
+
+Confirmed response shape (from the library's own docs) — each match is a
+dict already in exactly the shape arbitrage.py wants:
+    {'home': 4.0, 'draw': 3.75, 'away': 1.92, 'match': 'Brentford FC - Arsenal FC',
+     'match_id': 4467373, 'league': 'Premier League', 'time': 1628881200000}
 """
 
 import logging
-import time
 
-import config
-from bet9ja_nairabet_source import Bet9jaNairabetSource
-from oddsapi_source import OddsApiSource
-from match_matcher import match_across_sources
-from arbitrage import check_arbitrage
-from telegram_alerts import send_alert
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-log = logging.getLogger("main")
-
-_last_alerted: dict[str, float] = {}
+log = logging.getLogger("bet9ja_nairabet_source")
 
 
-def _should_alert(match_label: str) -> bool:
-    last = _last_alerted.get(match_label)
-    return last is None or (time.time() - last) >= config.ALERT_COOLDOWN_SECONDS
+class Bet9jaNairabetSource:
+    def __init__(self):
+        try:
+            from NaijaBet_Api.bookmakers import bet9ja, nairabet
+        except ImportError as e:
+            raise ImportError(
+                "Couldn't import NaijaBet_Api as expected. Run "
+                "`python3 -c \"import NaijaBet_Api; help(NaijaBet_Api)\"` "
+                "to see the real package layout and tell me what it shows."
+            ) from e
+        self._bet9ja = bet9ja.Bet9ja()
+        self._nairabet = nairabet.Nairabet()
+        # NOTE: "Nairabet" casing confirmed by symmetry with Bet9ja's
+        # confirmed pattern, but not independently verified the same way —
+        # if this specific line errors, tell me the exact message and I'll
+        # adjust (e.g. it might be NairaBet or NairaBET).
 
+    def fetch_matches(self) -> list[dict]:
+        """
+        Returns matches from both bookmakers, converted into this bot's
+        common shape: [{"match_label": ..., "odds_by_bookmaker": {...}}]
+        Matches appearing on both sites are merged into one entry so the
+        arbitrage check can compare them directly without needing the
+        cross-source match_matcher for this pair (same naming convention,
+        since both come through the same library).
+        """
+        merged: dict[str, dict] = {}  # keyed by normalized match label
 
-def run_once(naijabet_source: Bet9jaNairabetSource, oddsapi_source: OddsApiSource) -> int:
-    """One full scan pass. Returns number of alerts sent."""
-    try:
-        naijabet_matches = naijabet_source.fetch_matches()
-    except Exception as e:
-        log.error("Failed to fetch Bet9ja/NairaBet odds: %s", e)
-        return 0
+        for bookmaker_key, client in (("bet9ja", self._bet9ja), ("nairabet", self._nairabet)):
+            try:
+                raw_matches = client.get_all()
+            except Exception as e:
+                log.error("Failed to fetch from %s: %s", bookmaker_key, e)
+                continue
 
-    try:
-        # Discovers and fetches ALL currently available soccer leagues
-        # (EPL, La Liga, Serie A, Bundesliga, Champions League, etc.) —
-        # not just one, so this actually has a chance to match against the
-        # full spread of matches Bet9ja/NairaBet cover.
-        oddsapi_matches = oddsapi_source.fetch_matches()
-    except Exception as e:
-        log.error("Failed to fetch 1xBet/Betway odds: %s", e)
-        return 0
+            for m in raw_matches:
+                label = m.get("match")
+                if not label or "home" not in m or "draw" not in m or "away" not in m:
+                    continue  # incomplete entry, skip rather than guess
 
-    log.info("Fetched %d Bet9ja/NairaBet matches, %d 1xBet/Betway matches",
-              len(naijabet_matches), len(oddsapi_matches))
+                key = label.strip().lower()
+                if key not in merged:
+                    merged[key] = {
+                        "match_label": label,
+                        "match_time": m.get("time"),
+                        "odds_by_bookmaker": {},
+                    }
+                merged[key]["odds_by_bookmaker"][bookmaker_key] = {
+                    "home": m["home"],
+                    "draw": m["draw"],
+                    "away": m["away"],
+                }
 
-    paired = match_across_sources(naijabet_matches, oddsapi_matches)
-    log.info("Matched %d pairs across both sources", len(paired))
-
-    alerts_sent = 0
-    for match in paired:
-        result = check_arbitrage(
-            match["match_label"],
-            match["odds_by_bookmaker"],
-            min_roi_pct=config.MIN_ROI_PCT,
-            total_stake=config.DEFAULT_TOTAL_STAKE,
-        )
-        if result is None:
-            continue
-
-        if not _should_alert(result.match_label):
-            log.info("Suppressing repeat alert for %s (cooldown active)", result.match_label)
-            continue
-
-        log.info("Arbitrage found: %s — %.2f%% guaranteed profit",
-                  result.match_label, result.guaranteed_roi_pct)
-
-        if send_alert(result):
-            _last_alerted[result.match_label] = time.time()
-            alerts_sent += 1
-
-    return alerts_sent
-
-
-def main():
-    if not config.ODDS_API_KEY:
-        raise SystemExit("ODDS_API_KEY is not set — get a free key from the-odds-api.com")
-
-    naijabet_source = Bet9jaNairabetSource()
-    oddsapi_source = OddsApiSource(config.ODDS_API_KEY)
-
-    if config.RUN_ONCE:
-        log.info("Running single scan pass (RUN_ONCE mode)")
-        sent = run_once(naijabet_source, oddsapi_source)
-        log.info("Sent %d alert(s) this pass", sent)
-        return
-
-    log.info(
-        "Starting scan loop: interval=%ds, min_roi=%.1f%%, stake=₦%.0f",
-        config.POLL_INTERVAL_SECONDS, config.MIN_ROI_PCT, config.DEFAULT_TOTAL_STAKE,
-    )
-
-    while True:
-        start = time.time()
-        sent = run_once(naijabet_source, oddsapi_source)
-        if sent:
-            log.info("Sent %d alert(s) this pass", sent)
-        elapsed = time.time() - start
-        time.sleep(max(0, config.POLL_INTERVAL_SECONDS - elapsed))
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        log.info("Stopped by user.")
+        return list(merged.values())
