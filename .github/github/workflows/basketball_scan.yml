@@ -1,0 +1,35 @@
+name: Basketball Arb Scan
+
+# Every 4 hours — WNBA only, stays well within The Odds API's free budget
+# at this frequency (uses a SEPARATE Odds API account/key from football,
+# so they don't compete for the same 500-credit/month pool).
+on:
+  schedule:
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests python-dotenv
+
+      - name: Run a single scan
+        run: python main_basketball.py
+        env:
+          RUN_ONCE: "true"
+          BASKETBALL_TELEGRAM_BOT_TOKEN: ${{ secrets.BASKETBALL_TELEGRAM_BOT_TOKEN }}
+          BASKETBALL_TELEGRAM_CHAT_ID: ${{ secrets.BASKETBALL_TELEGRAM_CHAT_ID }}
+          ODDS_API_KEY: ${{ secrets.BASKETBALL_ODDS_API_KEY }}
+          BASKETBALL_DEFAULT_TOTAL_STAKE: "1000"
+          BASKETBALL_MIN_ROI_PCT: "2.0"
