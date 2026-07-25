@@ -1,0 +1,35 @@
+name: Football Arb Scan
+
+# Once daily — 5 curated leagues stays safely within The Odds API's
+# 500-credit/month free budget at this frequency. Can also be triggered
+# manually from the Actions tab for testing.
+on:
+  schedule:
+    - cron: '0 8 * * *'   # 8am UTC daily
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run a single scan
+        run: python main.py
+        env:
+          RUN_ONCE: "true"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          DEFAULT_TOTAL_STAKE: "1000"
+          MIN_ROI_PCT: "2.0"
