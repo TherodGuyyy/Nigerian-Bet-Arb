@@ -1,0 +1,135 @@
+# Nigerian Betting Arbitrage Bot
+
+Compares Bet9ja + NairaBet odds against 1xBet + Betway odds for the same
+football matches, and alerts you on Telegram when the best prices across
+all 4 combine to guarantee a profit regardless of the result.
+
+## ⚠️ What's tested vs. what needs your verification
+
+Built and thoroughly tested in a sandboxed environment with no network
+access — here's exactly what that means for trust levels:
+
+**Fully tested (I'm confident in these):**
+- `arbitrage.py` — the core math. Verified that stake allocation produces
+  the SAME profit regardless of which outcome wins (tested: ₦61.68 profit
+  whether home, draw, or away wins). This is the most important thing to
+  get right and it's solid.
+- `match_matcher.py` — pairing the same match across differently-formatted
+  sources. **Caught and fixed a real bug during testing**: the first
+  version would have treated Manchester United and Manchester City as the
+  same club. Now specifically tested against that exact adversarial case
+  (two different-but-similar-sounding matches) to confirm it stays
+  correctly unmatched rather than guessing.
+- `bet9ja_nairabet_source.py` / `oddsapi_source.py` — the data parsing and
+  merging logic, tested against realistic mock data including malformed
+  entries.
+- Full pipeline integration — fetch → match → detect arb → alert →
+  cooldown → failure handling, all tested together.
+
+**NOT tested — genuinely unverified, needs your first real run to confirm:**
+- Whether `NaijaBet_Api` actually installs and imports the way this code
+  assumes (I found two slightly different import examples in its own docs
+  — see the note at the top of `bet9ja_nairabet_source.py` for what to do
+  if it doesn't match).
+- The Odds API's exact bookmaker key names for 1xBet/Betway (`onexbet`,
+  `betway`) — these weren't confirmed via a live API call. If a key's
+  wrong, that bookmaker will just silently not appear in results rather
+  than error — worth checking manually against a real response early on.
+- Both libraries' actual live JSON shape — built against their documented
+  formats, not a live test.
+
+None of the above will cause WRONG numbers if something's off — the code
+is written defensively (skips malformed data, logs warnings) rather than
+guessing. Worst case is it finds nothing until a field name gets corrected,
+not that it finds a false arbitrage.
+
+## League/sport coverage
+
+**Football bot (`main.py`)**: covers ALL soccer leagues The Odds API
+currently supports (EPL, La Liga, Serie A, Bundesliga, Champions League,
+and more), discovered dynamically each run — not hardcoded to one league.
+Combined with whatever Bet9ja/NairaBet's `get_all()` returns (also "all
+leagues" per the library's own docs).
+
+**Basketball bot (`main_basketball.py`)** — a separate sibling bot, run
+independently:
+- Only compares **1xBet vs Betway** (2 bookmakers, not 4) — Bet9ja/
+  NairaBet's library doesn't support basketball at all, so they can't be
+  included here.
+- Casts a wide net across all basketball leagues The Odds API supports
+  (NBA, NCAA, WNBA, Euroleague, etc.), discovered dynamically.
+- Uses a 2-way moneyline market (home/away, no draw) — the same core
+  arbitrage math as football, generalized to work with any number of
+  outcomes (tested against both shapes).
+- Needs its OWN separate Telegram bot (`BASKETBALL_TELEGRAM_BOT_TOKEN` /
+  `BASKETBALL_TELEGRAM_CHAT_ID` in `.env`) — set up a fresh one via
+  @BotFather, same process as before.
+- Run it with `python main_basketball.py`, separately from `python main.py`
+  — they're two independent processes.
+
+Worth knowing: because basketball only has 2 bookmakers instead of 4,
+genuine arbitrage opportunities will likely show up less often than on the
+football bot — fewer books means less chance of one being mispriced
+relative to the other.
+
+## Setup
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Fill in `.env`:
+1. **TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID** — new bot via @BotFather, same
+   process as your other bots.
+2. **ODDS_API_KEY** — free key from **the-odds-api.com** (not
+   theoddsapi.com — different service, same-sounding name).
+
+### First run — verification checklist
+
+```bash
+python3 -c "import NaijaBet_Api; help(NaijaBet_Api)"
+```
+Confirm this works and matches the import style in
+`bet9ja_nairabet_source.py`. If not, tell me exactly what it shows.
+
+Then:
+```bash
+python main.py
+```
+Watch the log for:
+- "Fetched N Bet9ja/NairaBet matches, M 1xBet/Betway matches" — if either
+  N or M is 0 repeatedly, something's not connecting right on that side.
+- "Matched N pairs" — if this stays at 0 while both sources show matches,
+  the team-name matching may need tuning (different leagues/naming
+  conventions than what this was tested against).
+
+## Config reference (`.env`)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DEFAULT_TOTAL_STAKE` | 1000 | Total ₦ stake shown per opportunity |
+| `MIN_ROI_PCT` | 2.0 | Minimum guaranteed profit % before alerting |
+| `POLL_INTERVAL_SECONDS` | 120 | How often to scan |
+| `ALERT_COOLDOWN_SECONDS` | 600 | Don't re-alert the same match within this window |
+
+## Important reminders
+
+- **Bet9ja/NairaBet access is via an unofficial library**, not an API these
+  bookmakers publish themselves — it could break without warning. Worth
+  checking on periodically.
+- **Odds move.** Every alert is a snapshot. Verify live prices on each site
+  before placing bets — the guaranteed-profit math only holds if you get
+  in at the prices shown.
+- **Football only** — Bet9ja/NairaBet's library doesn't support basketball,
+  so this bot is soccer-specific by design (see chat for the reasoning).
+- Currently set to English Premier League (`SPORT_KEY` in
+  `oddsapi_source.py`) — widen this to other leagues once the EPL version
+  is confirmed working.
+
+## Deployment
+
+Needs to run continuously to catch opportunities as they appear — same
+pattern as your other bots. Render (with the UptimeRobot keep-alive trick)
+or Oracle Cloud both work; let me know which you'd prefer and I'll walk
+through the specific steps.
